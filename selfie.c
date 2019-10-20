@@ -9603,6 +9603,7 @@ int main(int argc, char** argv) {
 
   print("David Papes Selfie!\n");
   print("David Papes Selfie!\n");
+  print("David Papes Selfie!\n");
 
   return selfie();
 }
