@@ -9600,6 +9600,7 @@ int main(int argc, char** argv) {
   init_selfie((uint64_t) argc, (uint64_t*) argv);
 
   init_library();
+  print("testin'");
 
   return selfie();
 }
