@@ -9601,9 +9601,5 @@ int main(int argc, char** argv) {
 
   init_library();
 
-  print("David Papes Selfie!\n");
-  print("David Papes Selfie!\n");
-  print("David Papes Selfie!\n");
-
   return selfie();
 }
