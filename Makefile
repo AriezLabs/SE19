@@ -10,8 +10,7 @@ selfie.m selfie.s: selfie
 	./selfie -c selfie.c -o selfie.m -s selfie.s
 
 # Consider these targets as targets, not files
-
-.PHONY : compile quine escape debug replay os vm min mob smt sat assemble spike qemu boolector grader all clean
+.PHONY : compile quine escape debug replay os vm min mob smt mc sat assemble spike qemu boolector btormc grader all clean
 
 # Self-contained fixed-point of self-compilation
 compile: selfie
@@ -51,13 +50,17 @@ min: selfie.m selfie.s
 	diff -q selfie.m selfie4.m
 	diff -q selfie.s selfie4.s
 
-# Run mobster
+# Run mobster, the emulator without pager
 mob: selfie
 	./selfie -c -mob 1
 
-# Run monster
+# Run monster as symbolic execution engine
 smt: selfie
-	./selfie -c manuscript/code/symbolic.c -n 0
+	./selfie -c manuscript/code/symbolic/simple-assignment.c -se 0
+
+# Run monster as symbolic model generator
+mc: selfie
+	./selfie -c manuscript/code/symbolic/simple-assignment.c -mc 0
 
 # Run SAT solver
 sat: selfie.m
@@ -84,22 +87,28 @@ qemu: selfie.m selfie.s
 
 # Test boolector SMT solver
 boolector: smt
-	boolector manuscript/code/symbolic.t -e 0 > selfie_boolector.sat
+	boolector manuscript/code/symbolic/simple-assignment.smt -e 0 > selfie_boolector.sat
 	[ $$(grep ^sat$$ selfie_boolector.sat | wc -l) -eq 2 ]
-	[ $$(grep ^unsat$$ selfie_boolector.sat | wc -l) -eq 1 ]
+
+# Test btormc bounded model checker
+btormc: mc
+	btormc manuscript/code/symbolic/simple-assignment.btor2
 
 # Test grader
 grader:
-	python3 -m unittest -v grader.tests.test_all
+	cd grader && python3 -m unittest discover -v
 
 # Run everything
-all: compile quine debug replay os vm min mob smt sat
+all: compile quine debug replay os vm min mob smt mc sat
 
 # Clean up
 clean:
 	rm -rf *.m
 	rm -rf *.s
-	rm -rf *.t
+	rm -rf *.smt
+	rm -rf *.btor2
+	rm -rf *.sat
 	rm -rf selfie
 	rm -rf selfie.exe
-	rm -rf manuscript/code/*.t
+	rm -rf manuscript/code/symbolic/*.smt
+	rm -rf manuscript/code/symbolic/*.btor2
