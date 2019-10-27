@@ -8,3 +8,4 @@ selfie
 selfie.exe
 manuscript/code/symbolic/*.smt
 manuscript/code/symbolic/*.btor2
+*sublime-*
