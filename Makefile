@@ -112,3 +112,6 @@ clean:
 	rm -rf selfie.exe
 	rm -rf manuscript/code/symbolic/*.smt
 	rm -rf manuscript/code/symbolic/*.btor2
+
+grade: clean selfie 
+	python grader/self.py concurrent-machines
