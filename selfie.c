@@ -1430,6 +1430,10 @@ void init_interpreter() {
   *(EXCEPTIONS + EXCEPTION_MERGE)              = (uint64_t) "merge interrupt";
 }
 
+/**
+ * reset pc, instruction register, instruction id, registers, page table, trap flag to 0
+ * set timer to TIMEROFF
+ */
 void reset_interpreter() {
   pc = 0;
   ir = 0;
