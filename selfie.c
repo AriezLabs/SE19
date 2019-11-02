@@ -1432,7 +1432,7 @@ void init_interpreter() {
 
 /**
  * reset pc, instruction register, instruction id, registers, page table, trap flag to 0
- * set timer to TIMEROFF
+ * set timer to TIMEROFF: ## what does this mean?
  */
 void reset_interpreter() {
   pc = 0;
@@ -1448,6 +1448,9 @@ void reset_interpreter() {
   timer = TIMEROFF;
 }
 
+/**
+ * Profiler collects stats about executed programs. This call resets collected stats
+ */
 void reset_profiler() {
   reset_instruction_counters();
 
@@ -1615,7 +1618,7 @@ void restore_context(uint64_t* context);
 
 // ------------------------ GLOBAL CONSTANTS -----------------------
 
-uint64_t debug_create = 0;
+uint64_t debug_create = 1;
 uint64_t debug_map    = 0;
 
 // ------------------------ GLOBAL VARIABLES -----------------------
@@ -1627,6 +1630,10 @@ uint64_t* free_contexts = (uint64_t*) 0; // singly-linked list of free contexts
 
 // ------------------------- INITIALIZATION ------------------------
 
+/**
+ * resets current_context pointer 
+ * clears used_contexts, a doubly linked list of used contexts, and returns them to free_contexts
+ */
 void reset_microkernel() {
   current_context = (uint64_t*) 0;
 
@@ -5538,6 +5545,9 @@ void decode_u_format() {
 // ---------------------------- BINARY -----------------------------
 // -----------------------------------------------------------------
 
+/**
+ * set ICs back to 0: just for statistics
+ */
 void reset_instruction_counters() {
   ic_lui   = 0;
   ic_addi  = 0;
@@ -6683,6 +6693,9 @@ void implement_brk(uint64_t* context) {
 // ----------------------- HYPSTER SYSCALLS ------------------------
 // -----------------------------------------------------------------
 
+/**
+ * switch ecall procedure that always goes at the top of emitted binary
+ */
 void emit_switch() {
   create_symbol_table_entry(LIBRARY_TABLE, "hypster_switch", 0, PROCEDURE, UINT64STAR_T, 0, binary_length);
 
@@ -6702,6 +6715,12 @@ void emit_switch() {
   emit_jalr(REG_ZR, REG_RA, 0);
 }
 
+/**
+ * Update pc, registers etc. to point to new machine context.
+ * Save current context into new context's A6 register ## why?
+ * Reset timer to $timeout.
+ * Return context that is being switched to
+ */
 uint64_t* do_switch(uint64_t* from_context, uint64_t* to_context, uint64_t timeout) {
   restore_context(to_context);
 
@@ -6768,6 +6787,12 @@ void implement_switch() {
   }
 }
 
+/**
+ * Switch to next context by updating current_context
+ * Run until exception (usually interrupt)
+ * Save context's registers etc
+ * Return the new context that just ran into an exception
+ */
 uint64_t* mipster_switch(uint64_t* to_context, uint64_t timeout) {
   current_context = do_switch(current_context, to_context, timeout);
 
@@ -8914,6 +8939,9 @@ void execute_symbolically() {
     do_ecall();
 }
 
+/**
+ * Update timer: subtract 1. Throw a timer exception if timer hits zero
+ */
 void interrupt() {
   if (timer != TIMEROFF) {
     timer = timer - 1;
@@ -9058,6 +9086,10 @@ void print_profile() {
 // ---------------------------- CONTEXTS ---------------------------
 // -----------------------------------------------------------------
 
+/**
+ * Get an empty context struct either from free_contexts list or create a new one and 
+ * prepend it to used_context list. Return the new context struct
+ */
 uint64_t* new_context() {
   uint64_t* context;
 
@@ -9083,6 +9115,10 @@ uint64_t* new_context() {
   return context;
 }
 
+/**
+ * Take a context and initialize its data fields: e.g. allocate memory for registers, pc, page table
+ * Set parent and virtual context according to parameters
+ */
 void init_context(uint64_t* context, uint64_t* parent, uint64_t* vctxt) {
   set_pc(context, 0);
 
@@ -9224,6 +9260,10 @@ void free_context(uint64_t* context) {
   free_contexts = context;
 }
 
+/**
+ * clears context from doubly linked list and fixes it up
+ * returns the context to free context list
+ */
 uint64_t* delete_context(uint64_t* context, uint64_t* from) {
   if (get_next_context(context) != (uint64_t*) 0)
     set_prev_context(get_next_context(context), get_prev_context(context));
@@ -9243,6 +9283,9 @@ uint64_t* delete_context(uint64_t* context, uint64_t* from) {
 // -------------------------- MICROKERNEL --------------------------
 // -----------------------------------------------------------------
 
+/**
+ * Return a new and initiated context
+ */
 uint64_t* create_context(uint64_t* parent, uint64_t* vctxt) {
   uint64_t* context;
 
@@ -9271,6 +9314,11 @@ uint64_t* cache_context(uint64_t* vctxt) {
   return context;
 }
 
+/**
+ * save current context's registers, program break, excepton, faulting page, exit code
+ * to its machine context data structure.
+ * ## not totally clear
+ */
 void save_context(uint64_t* context) {
   uint64_t* parent_table;
   uint64_t* vctxt;
@@ -9481,6 +9529,11 @@ void pfree(uint64_t* frame) {
   frame = frame + 1;
 }
 
+/**
+ * ## not entirely clear...
+ * Maps some section of the generated binary into machine context?
+ * and stores $data into virtual memory of $context
+ */
 void map_and_store(uint64_t* context, uint64_t vaddr, uint64_t data) {
   // assert: is_valid_virtual_address(vaddr) == 1
 
@@ -9490,6 +9543,9 @@ void map_and_store(uint64_t* context, uint64_t vaddr, uint64_t data) {
   store_virtual_memory(get_pt(context), vaddr, data);
 }
 
+/**
+ * Loads binary that was just compiled into $context
+ */
 void up_load_binary(uint64_t* context) {
   uint64_t baddr;
 
@@ -9536,6 +9592,11 @@ uint64_t up_load_string(uint64_t* context, char* s, uint64_t SP) {
   return SP;
 }
 
+/**
+ * ## unclear
+ * apparently, arguments are pushed onto the virtual stack of each context
+ * before any calls happen
+ */
 void up_load_arguments(uint64_t* context, uint64_t argc, uint64_t* argv) {
   /* upload arguments like a UNIX system
 
@@ -9731,6 +9792,10 @@ uint64_t handle_exception(uint64_t* context) {
   }
 }
 
+/**
+ * Run contexts in round robin schedule for TIMESLICE instructions each.
+ * Return if any context makes EXIT syscall.
+ */
 uint64_t mipster(uint64_t* to_context) {
   uint64_t timeout;
   uint64_t* from_context;
@@ -10064,6 +10129,11 @@ uint64_t is_boot_level_zero() {
   return 0;
 }
 
+/**
+ * Create a new context with parent/virtual context 0
+ * Load generated binary into it and pass remaining arguments
+ * Point current_context to it
+ */
 void boot_loader() {
   current_context = create_context(MY_CONTEXT, 0);
 
@@ -10088,6 +10158,7 @@ uint64_t selfie_run(uint64_t machine) {
   reset_profiler();
   reset_microkernel();
 
+  // set flags
   if (machine == DIPSTER) {
     debug          = 1;
     debug_syscalls = 1;
@@ -10109,7 +10180,7 @@ uint64_t selfie_run(uint64_t machine) {
     max_execution_depth = atoi(peek_argument(0));
   }
 
-  boot_loader();
+  boot_loader(); // ## A1: create multiple contexts like this in a list
 
   printf3("%s: selfie executing %s with %dMB physical memory on ", selfie_name,
     binary_name,
