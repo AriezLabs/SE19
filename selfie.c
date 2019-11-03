@@ -1667,6 +1667,8 @@ uint64_t handle_merge(uint64_t* context);
 
 uint64_t handle_exception(uint64_t* context);
 
+uint64_t* scheduler_next_context();
+
 uint64_t mipster(uint64_t* to_context);
 uint64_t hypster(uint64_t* to_context);
 
@@ -1680,8 +1682,8 @@ uint64_t mobster(uint64_t* to_context);
 char*    replace_extension(char* filename, char* extension);
 uint64_t monster(uint64_t* to_context);
 
-uint64_t is_boot_level_zero();
-void     boot_loader();
+uint64_t  is_boot_level_zero();
+uint64_t* boot_loader();
 
 uint64_t selfie_run(uint64_t machine);
 
@@ -1721,6 +1723,9 @@ uint64_t MINSTER = 5;
 uint64_t MOBSTER = 6;
 
 uint64_t HYPSTER = 7;
+
+uint64_t MULTIMIPSTER = 8;
+uint64_t MULTIHYPSTER = 9;
 
 // ------------------------ GLOBAL VARIABLES -----------------------
 
@@ -9793,6 +9798,15 @@ uint64_t handle_exception(uint64_t* context) {
 }
 
 /**
+ * Get the next context to be executed
+ */
+uint64_t* scheduler_next_context(uint64_t* previous_context) {
+  if (get_next_context(previous_context) == (uint64_t*) 0)
+    return used_contexts;
+  return get_next_context(previous_context);
+}
+
+/**
  * Run contexts in round robin schedule for TIMESLICE instructions each.
  * Return if any context makes EXIT syscall.
  */
@@ -9816,7 +9830,7 @@ uint64_t mipster(uint64_t* to_context) {
       return get_exit_code(from_context);
     else {
       // TODO: scheduler should go here
-      to_context = from_context;
+      to_context = scheduler_next_context(from_context);
 
       timeout = TIMESLICE;
     }
@@ -9835,7 +9849,7 @@ uint64_t hypster(uint64_t* to_context) {
       return get_exit_code(from_context);
     else
       // TODO: scheduler should go here
-      to_context = from_context;
+      to_context = scheduler_next_context(from_context);
   }
 }
 
@@ -10131,22 +10145,27 @@ uint64_t is_boot_level_zero() {
 
 /**
  * Create a new context with parent/virtual context 0
- * Load generated binary into it and pass remaining arguments
- * Point current_context to it
+ * Load generated/loaded binary into context and pass remaining arguments to stack
+ * Return context
  */
-void boot_loader() {
-  current_context = create_context(MY_CONTEXT, 0);
+uint64_t* boot_loader() {
+  uint64_t* context; 
 
-  up_load_binary(current_context);
+  context = create_context(MY_CONTEXT, 0);
+
+  up_load_binary(context);
 
   // pass binary name as first argument by replacing current argument
   set_argument(binary_name);
 
-  up_load_arguments(current_context, number_of_remaining_arguments(), remaining_arguments());
+  up_load_arguments(context, number_of_remaining_arguments(), remaining_arguments());
+
+  return context;
 }
 
 uint64_t selfie_run(uint64_t machine) {
   uint64_t exit_code;
+  uint64_t num_concurrent_machines;
 
   if (binary_length == 0) {
     printf1("%s: nothing to run, debug, or host\n", selfie_name);
@@ -10172,15 +10191,30 @@ uint64_t selfie_run(uint64_t machine) {
     symbolic = 1;
   }
 
-  if (machine != MONSTER)
-    init_memory(atoi(peek_argument(0)));
-  else {
-    init_memory(1);
+  if (machine == MULTIMIPSTER) {
+    init_memory(16);
+    num_concurrent_machines = atoi(peek_argument(0));
+    machine = MIPSTER;
 
+  } else if (machine == MULTIHYPSTER) {
+    init_memory(16);
+    num_concurrent_machines = atoi(peek_argument(0));
+    machine = HYPSTER;
+
+  } else if (machine == MONSTER) {
+    init_memory(1);
+    num_concurrent_machines = 1;
     max_execution_depth = atoi(peek_argument(0));
+
+  } else {
+    init_memory(atoi(peek_argument(0)));
+    num_concurrent_machines = 1;
   }
 
-  boot_loader(); // ## A1: create multiple contexts like this in a list
+  while (num_concurrent_machines > 0) {
+    current_context = boot_loader();
+    num_concurrent_machines = num_concurrent_machines - 1;
+  }
 
   printf3("%s: selfie executing %s with %dMB physical memory on ", selfie_name,
     binary_name,
@@ -11727,7 +11761,7 @@ uint64_t selfie_model_generate() {
       get_argument();
     }
 
-  boot_loader();
+  current_context = boot_loader();
 
   run = 0;
 
@@ -12675,12 +12709,16 @@ uint64_t selfie() {
         selfie_sat();
       else if (string_compare(option, "-m"))
         return selfie_run(MIPSTER);
+      else if (string_compare(option, "-x"))
+        return selfie_run(MULTIMIPSTER);
       else if (string_compare(option, "-d"))
         return selfie_run(DIPSTER);
       else if (string_compare(option, "-r"))
         return selfie_run(RIPSTER);
       else if (string_compare(option, "-y"))
         return selfie_run(HYPSTER);
+      else if (string_compare(option, "-z"))
+        return selfie_run(MULTIHYPSTER);
       else if (string_compare(option, "-min"))
         return selfie_run(MINSTER);
       else if (string_compare(option, "-mob"))
