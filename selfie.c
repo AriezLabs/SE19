@@ -108,7 +108,7 @@ uint64_t write(uint64_t fd, uint64_t* buffer, uint64_t bytes_to_write);
 // selfie bootstraps char to uint64_t!
 uint64_t open(char* filename, uint64_t flags, uint64_t mode);
 
-// selfie bootstraps void* to uint64_t* and unsigned to uint64_t!
+// selfie bootstraps void* and unsigned long to uint64_t* and uint64_t, respectively!
 void* malloc(unsigned long);
 
 // -----------------------------------------------------------------
@@ -977,6 +977,12 @@ uint64_t* ELF_header = (uint64_t*) 0;
 void emit_exit();
 void implement_exit(uint64_t* context);
 
+void emit_fork();
+void implement_fork(uint64_t* context);
+
+void emit_wait();
+void implement_wait(uint64_t* context);
+
 void emit_read();
 void implement_read(uint64_t* context);
 
@@ -998,6 +1004,8 @@ uint64_t debug_open  = 0;
 uint64_t debug_brk   = 0;
 
 uint64_t SYSCALL_EXIT   = 93;
+uint64_t SYSCALL_FORK   = 243;
+uint64_t SYSCALL_WAIT   = 244;
 uint64_t SYSCALL_READ   = 63;
 uint64_t SYSCALL_WRITE  = 64;
 uint64_t SYSCALL_OPENAT = 56;
@@ -1484,6 +1492,21 @@ uint64_t* find_context(uint64_t* parent, uint64_t* vctxt);
 void      free_context(uint64_t* context);
 uint64_t* delete_context(uint64_t* context, uint64_t* from);
 
+void deepcpy_regs(uint64_t* to, uint64_t* from);
+void deepcpy_pt_section(uint64_t* to, uint64_t* from, uint64_t startpage, uint64_t endpage);
+void deepcpy_pt(uint64_t* to, uint64_t* from);
+void deepcpy_ctxt(uint64_t* to, uint64_t* from);
+
+uint64_t STATE_READY = 0;
+uint64_t STATE_WAITING = 1;
+
+uint64_t current_max_pid = 0;
+
+uint64_t next_pid() {
+  current_max_pid = current_max_pid + 1;
+  return current_max_pid;
+}
+
 // context struct:
 // +----+-----------------+
 // |  0 | next context    | pointer to next context
@@ -1503,27 +1526,29 @@ uint64_t* delete_context(uint64_t* context, uint64_t* from);
 // | 14 | parent          | context that created this context
 // | 15 | virtual context | virtual context address
 // | 16 | name            | binary name loaded into context
+// | 17 | pid             | ID of context
+// | 18 | state           | current state of context (see above)
 // +----+-----------------+
 // symbolic extension:
 // +----+-----------------+
-// | 17 | execution depth | number of executed instructions
-// | 18 | path condition  | pointer to path condition
-// | 19 | symbolic memory | pointer to symbolic memory
-// | 20 | symbolic regs   | pointer to symbolic registers
-// | 21 | beq counter     | number of executed symbolic beq instructions
-// | 22 | merge location  | program location at which the context can possibly be merged (later)
-// | 23 | prologues       | pointer to a stack that stores the prologues of procedures within which the context is currently located
-// | 24 | in recursion    | if the value is 1, then the context is currently in a recursion
-// | 25 | outside rec loc | program location at which the context has finished the recursion
-// | 26 | merge partner   | pointer to the context from which this context was created
+// | 18 | execution depth | number of executed instructions
+// | 19 | path condition  | pointer to path condition
+// | 20 | symbolic memory | pointer to symbolic memory
+// | 21 | symbolic regs   | pointer to symbolic registers
+// | 22 | beq counter     | number of executed symbolic beq instructions
+// | 23 | merge location  | program location at which the context can possibly be merged (later)
+// | 24 | prologues       | pointer to a stack that stores the prologues of procedures within which the context is currently located
+// | 25 | in recursion    | if the value is 1, then the context is currently in a recursion
+// | 26 | outside rec loc | program location at which the context has finished the recursion
+// | 27 | merge partner   | pointer to the context from which this context was created
 // +----+-----------------+
 
 uint64_t* allocate_context() {
-  return smalloc(7 * SIZEOFUINT64STAR + 10 * SIZEOFUINT64);
+  return smalloc(7 * SIZEOFUINT64STAR + 12 * SIZEOFUINT64);
 }
 
 uint64_t* allocate_symbolic_context() {
-  return smalloc(7 * SIZEOFUINT64STAR + 10 * SIZEOFUINT64 + 5 * SIZEOFUINT64STAR + 5 * SIZEOFUINT64);
+  return smalloc(7 * SIZEOFUINT64STAR + 12 * SIZEOFUINT64 + 5 * SIZEOFUINT64STAR + 5 * SIZEOFUINT64);
 }
 
 uint64_t next_context(uint64_t* context)    { return (uint64_t) context; }
@@ -1543,6 +1568,8 @@ uint64_t exit_code(uint64_t* context)       { return (uint64_t) (context + 13); 
 uint64_t parent(uint64_t* context)          { return (uint64_t) (context + 14); }
 uint64_t virtual_context(uint64_t* context) { return (uint64_t) (context + 15); }
 uint64_t name(uint64_t* context)            { return (uint64_t) (context + 16); }
+uint64_t pid(uint64_t* context)             { return (uint64_t) (context + 17); }
+uint64_t state(uint64_t* context)           { return (uint64_t) (context + 18); }
 
 uint64_t* get_next_context(uint64_t* context)    { return (uint64_t*) *context; }
 uint64_t* get_prev_context(uint64_t* context)    { return (uint64_t*) *(context + 1); }
@@ -1561,17 +1588,19 @@ uint64_t  get_exit_code(uint64_t* context)       { return             *(context 
 uint64_t* get_parent(uint64_t* context)          { return (uint64_t*) *(context + 14); }
 uint64_t* get_virtual_context(uint64_t* context) { return (uint64_t*) *(context + 15); }
 char*     get_name(uint64_t* context)            { return (char*)     *(context + 16); }
+uint64_t  get_pid(uint64_t* context)             { return             *(context + 17); }
+uint64_t  get_state(uint64_t* context)           { return             *(context + 18); }
 
-uint64_t  get_execution_depth(uint64_t* context) { return             *(context + 17); }
-char*     get_path_condition(uint64_t* context)  { return (char*)     *(context + 18); }
-uint64_t* get_symbolic_memory(uint64_t* context) { return (uint64_t*) *(context + 19); }
-uint64_t* get_symbolic_regs(uint64_t* context)   { return (uint64_t*) *(context + 20); }
-uint64_t  get_beq_counter(uint64_t* context)     { return             *(context + 21); }
-uint64_t  get_merge_location(uint64_t* context)  { return             *(context + 22); }
-uint64_t* get_prologues(uint64_t* context)       { return (uint64_t*) *(context + 23); }
-uint64_t  get_in_recursion(uint64_t* context)    { return             *(context + 24); }
-uint64_t  get_outside_rec_loc(uint64_t* context) { return             *(context + 25); }
-uint64_t* get_merge_partner(uint64_t* context)   { return (uint64_t*) *(context + 26); }
+uint64_t  get_execution_depth(uint64_t* context) { return             *(context + 19); }
+char*     get_path_condition(uint64_t* context)  { return (char*)     *(context + 20); }
+uint64_t* get_symbolic_memory(uint64_t* context) { return (uint64_t*) *(context + 21); }
+uint64_t* get_symbolic_regs(uint64_t* context)   { return (uint64_t*) *(context + 22); }
+uint64_t  get_beq_counter(uint64_t* context)     { return             *(context + 23); }
+uint64_t  get_merge_location(uint64_t* context)  { return             *(context + 24); }
+uint64_t* get_prologues(uint64_t* context)       { return (uint64_t*) *(context + 25); }
+uint64_t  get_in_recursion(uint64_t* context)    { return             *(context + 26); }
+uint64_t  get_outside_rec_loc(uint64_t* context) { return             *(context + 27); }
+uint64_t* get_merge_partner(uint64_t* context)   { return (uint64_t*) *(context + 28); }
 
 void set_next_context(uint64_t* context, uint64_t* next)      { *context        = (uint64_t) next; }
 void set_prev_context(uint64_t* context, uint64_t* prev)      { *(context + 1)  = (uint64_t) prev; }
@@ -1590,17 +1619,19 @@ void set_exit_code(uint64_t* context, uint64_t code)          { *(context + 13) 
 void set_parent(uint64_t* context, uint64_t* parent)          { *(context + 14) = (uint64_t) parent; }
 void set_virtual_context(uint64_t* context, uint64_t* vctxt)  { *(context + 15) = (uint64_t) vctxt; }
 void set_name(uint64_t* context, char* name)                  { *(context + 16) = (uint64_t) name; }
+void set_pid(uint64_t* context, uint64_t pid)                 { *(context + 17) = (uint64_t) pid; }
+void set_state(uint64_t* context, uint64_t state)             { *(context + 18) = (uint64_t) state; }
 
-void set_execution_depth(uint64_t* context, uint64_t depth)    { *(context + 17) =            depth; }
-void set_path_condition(uint64_t* context, char* path)         { *(context + 18) = (uint64_t) path; }
-void set_symbolic_memory(uint64_t* context, uint64_t* memory)  { *(context + 19) = (uint64_t) memory; }
-void set_symbolic_regs(uint64_t* context, uint64_t* regs)      { *(context + 20) = (uint64_t) regs; }
-void set_beq_counter(uint64_t* context, uint64_t counter)      { *(context + 21) =            counter; }
-void set_merge_location(uint64_t* context, uint64_t location)  { *(context + 22) =            location; }
-void set_prologues(uint64_t* context, uint64_t* prologues)     { *(context + 23) = (uint64_t) prologues; }
-void set_in_recursion(uint64_t* context, uint64_t in_rec)      { *(context + 24) =            in_rec; }
-void set_outside_rec_loc(uint64_t* context, uint64_t location) { *(context + 25) =            location; }
-void set_merge_partner(uint64_t* context, uint64_t* partner)   { *(context + 26) = (uint64_t) partner; }
+void set_execution_depth(uint64_t* context, uint64_t depth)    { *(context + 19) =            depth; }
+void set_path_condition(uint64_t* context, char* path)         { *(context + 20) = (uint64_t) path; }
+void set_symbolic_memory(uint64_t* context, uint64_t* memory)  { *(context + 21) = (uint64_t) memory; }
+void set_symbolic_regs(uint64_t* context, uint64_t* regs)      { *(context + 22) = (uint64_t) regs; }
+void set_beq_counter(uint64_t* context, uint64_t counter)      { *(context + 23) =            counter; }
+void set_merge_location(uint64_t* context, uint64_t location)  { *(context + 24) =            location; }
+void set_prologues(uint64_t* context, uint64_t* prologues)     { *(context + 25) = (uint64_t) prologues; }
+void set_in_recursion(uint64_t* context, uint64_t in_rec)      { *(context + 26) =            in_rec; }
+void set_outside_rec_loc(uint64_t* context, uint64_t location) { *(context + 27) =            location; }
+void set_merge_partner(uint64_t* context, uint64_t* partner)   { *(context + 28) = (uint64_t) partner; }
 
 // -----------------------------------------------------------------
 // -------------------------- MICROKERNEL --------------------------
@@ -1618,7 +1649,7 @@ void restore_context(uint64_t* context);
 
 // ------------------------ GLOBAL CONSTANTS -----------------------
 
-uint64_t debug_create = 1;
+uint64_t debug_create = 0;
 uint64_t debug_map    = 0;
 
 // ------------------------ GLOBAL VARIABLES -----------------------
@@ -1667,7 +1698,8 @@ uint64_t handle_merge(uint64_t* context);
 
 uint64_t handle_exception(uint64_t* context);
 
-uint64_t* scheduler_next_context();
+uint64_t* scheduler_next();
+uint64_t* next_context_in_list(uint64_t* previous_context);
 
 uint64_t mipster(uint64_t* to_context);
 uint64_t hypster(uint64_t* to_context);
@@ -5151,6 +5183,8 @@ void selfie_compile() {
   emit_open();
   emit_malloc();
   emit_switch();
+  emit_fork();
+  emit_wait();
 
   // implicitly declare main procedure in global symbol table
   // copy "main" string into zeroed double word to obtain unique hash
@@ -6114,6 +6148,11 @@ void selfie_load() {
 // ----------------------- MIPSTER SYSCALLS ------------------------
 // -----------------------------------------------------------------
 
+/**
+ * called once when the compilation process begins.
+ * this code is JAL'd to like a normal procedure:
+ * address is noted in library symbol table which shadows global table
+ */
 void emit_exit() {
   create_symbol_table_entry(LIBRARY_TABLE, "exit", 0, PROCEDURE, VOID_T, 0, binary_length);
 
@@ -6131,6 +6170,9 @@ void emit_exit() {
   // never returns here
 }
 
+/**
+ * executed if mipster runs into ecall with above parameters 
+ */
 void implement_exit(uint64_t* context) {
   // parameter;
   uint64_t signed_int_exit_code;
@@ -6163,6 +6205,53 @@ void implement_exit(uint64_t* context) {
     (char*) sign_extend(get_exit_code(context), SYSCALL_BITWIDTH),
     (char*) fixed_point_ratio(get_program_break(context) - get_original_break(context), MEGABYTE, 2));
 }
+
+void emit_fork() {
+  create_symbol_table_entry(LIBRARY_TABLE, "fork", 0, PROCEDURE, UINT64_T, 0, binary_length);
+
+  // load the correct syscall number and invoke syscall
+  emit_addi(REG_A7, REG_ZR, SYSCALL_FORK);
+
+  emit_ecall();
+
+  emit_jalr(REG_ZR, REG_RA, 0);
+}
+
+void implement_fork(uint64_t* context) {
+  uint64_t* child;
+
+  child = new_context();
+
+  deepcpy_ctxt(child, context);
+
+  // return pid of child to parent and 0 to child
+  *(get_regs(context) + REG_A0) = get_pid(child);
+  *(get_regs(child) + REG_A0) = 0;
+
+  set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
+  set_pc(child, get_pc(context));
+}
+
+void emit_wait() {
+  create_symbol_table_entry(LIBRARY_TABLE, "wait", 0, PROCEDURE, VOID_T, 0, binary_length);
+
+  // load the correct syscall number and invoke syscall
+  emit_addi(REG_A7, REG_ZR, SYSCALL_WAIT);
+
+  emit_ld(REG_A0, REG_SP, 0); // ptr
+  emit_addi(REG_SP, REG_SP, REGISTERSIZE);
+
+  emit_ecall();
+
+  emit_jalr(REG_ZR, REG_RA, 0);
+}
+
+void implement_wait(uint64_t* context) {
+  set_state(context, STATE_WAITING); // context won't be scheduled any more
+
+  set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
+}
+
 
 void emit_read() {
   create_symbol_table_entry(LIBRARY_TABLE, "read", 0, PROCEDURE, UINT64_T, 0, binary_length);
@@ -6847,7 +6936,7 @@ uint64_t is_page_mapped(uint64_t* table, uint64_t page) {
 }
 
 uint64_t is_valid_virtual_address(uint64_t vaddr) {
-  if (vaddr < VIRTUALMEMORYSIZE)
+  if (vaddr < VIRTUALMEMORYSIZE) 
     // memory must be word-addressed for lack of byte-sized data type
     if (vaddr % REGISTERSIZE == 0)
       return 1;
@@ -6855,6 +6944,9 @@ uint64_t is_valid_virtual_address(uint64_t vaddr) {
   return 0;
 }
 
+/**
+ * return the number of the page associated with virtual address
+ */
 uint64_t get_page_of_virtual_address(uint64_t vaddr) {
   return vaddr / PAGESIZE;
 }
@@ -8704,8 +8796,9 @@ void decode() {
   }
 
   if (is == 0) {
-    if (run)
+    if (run) {
       throw_exception(EXCEPTION_UNKNOWNINSTRUCTION, 0);
+    }
     else {
       //report the error on the console
       output_fd = 1;
@@ -9151,6 +9244,9 @@ void init_context(uint64_t* context, uint64_t* parent, uint64_t* vctxt) {
 
   set_name(context, 0);
 
+  set_pid(context, next_pid());
+  set_state(context, STATE_READY);
+
   if (symbolic) {
     set_execution_depth(context, 0);
     set_path_condition(context, "true");
@@ -9163,6 +9259,93 @@ void init_context(uint64_t* context, uint64_t* parent, uint64_t* vctxt) {
     set_outside_rec_loc(context, 0);
     set_merge_partner(context, (uint64_t*) 0);
   }
+}
+
+/**
+ * Copy contents of registers in $from context to $to context
+ */
+void deepcpy_regs(uint64_t* to, uint64_t* from) {
+  uint64_t current_reg;
+  uint64_t* original_regs;
+  uint64_t* new_regs;
+
+  new_regs = zalloc(NUMBEROFREGISTERS * REGISTERSIZE);
+  set_regs(to, new_regs);
+
+  original_regs = get_regs(from);
+
+  current_reg = 0;
+  while(current_reg < NUMBEROFREGISTERS) {
+    *(new_regs + current_reg) = *(original_regs + current_reg);
+    current_reg = current_reg + 1;
+  }
+}
+
+/**
+ * Copy contents of section of page table of $from context to $to context
+ */
+void deepcpy_pt_section(uint64_t* to, uint64_t* from, uint64_t startpage, uint64_t endpage) {
+  uint64_t* new_pt;
+  uint64_t* original_pt;
+  uint64_t current_page;
+  uint64_t current_vaddr;
+
+  new_pt = get_pt(to);
+  original_pt = get_pt(from);
+  current_page = startpage;
+
+  while(current_page <= endpage) {
+    if(is_page_mapped(original_pt, current_page)) {
+      map_page(to, current_page, (uint64_t) palloc());
+
+      current_vaddr = current_page * PAGESIZE; 
+      while(current_vaddr < (current_page + 1) * PAGESIZE) {
+        store_virtual_memory(new_pt, current_vaddr, load_virtual_memory(original_pt, current_vaddr));
+        current_vaddr = current_vaddr + REGISTERSIZE;
+      }
+    } 
+
+    current_page = current_page + 1;
+  }
+}
+
+/**
+ * Copy contents of page table of $from context to $to context
+ */
+void deepcpy_pt(uint64_t* to, uint64_t* from) {
+  set_pt(to, zalloc(VIRTUALMEMORYSIZE / PAGESIZE * REGISTERSIZE));
+
+  deepcpy_pt_section(to, from, get_lowest_lo_page(from), get_highest_lo_page(from));
+  deepcpy_pt_section(to, from, get_lowest_hi_page(from), get_highest_hi_page(from));
+}
+
+/**
+ * Deep copy a context
+ */
+void deepcpy_ctxt(uint64_t* to, uint64_t* from) {
+  deepcpy_regs(to, from);
+
+  // set uint64_t values
+  // TODO can some be left out e.g. exception, faulting page, exit code?
+  set_pc(to, get_pc(from));
+  set_lowest_lo_page(to, get_lowest_lo_page(from));
+  set_highest_lo_page(to, get_highest_lo_page(from));
+  set_lowest_hi_page(to, get_lowest_hi_page(from));
+  set_highest_hi_page(to, get_highest_hi_page(from));
+  set_original_break(to, get_original_break(from));
+  set_program_break(to, get_program_break(from));
+  set_exception(from, get_exception(from));
+  set_faulting_page(to, get_faulting_page(from));
+  set_exit_code(to, get_exit_code(from));
+  set_pid(to, next_pid());
+  set_state(to, STATE_READY);
+
+  // set uint64_t* values
+  set_parent(to, 0);//from); // TODO probably needed for wait to work properly
+  set_virtual_context(to, 0);//get_virtual_from(from)); // TODO what is vctxt
+  set_name(to, get_name(from)); // TODO deep copy this?
+
+  deepcpy_pt(to, from);
 }
 
 uint64_t* copy_context(uint64_t* original, uint64_t location, char* condition) {
@@ -9408,6 +9591,9 @@ void restore_region(uint64_t* context, uint64_t* table, uint64_t* parent_table, 
   }
 }
 
+/**
+ * TODO what does this do? what is vctxt used for?
+ */
 void restore_context(uint64_t* context) {
   uint64_t* parent_table;
   uint64_t* vctxt;
@@ -9422,6 +9608,8 @@ void restore_context(uint64_t* context) {
     parent_table = get_pt(get_parent(context));
 
     vctxt = get_virtual_context(context);
+    // TODO debugging
+    //printf1("vctxt: %d", (char*) vctxt);
 
     set_pc(context, load_virtual_memory(parent_table, program_counter(vctxt)));
 
@@ -9682,6 +9870,10 @@ uint64_t handle_system_call(uint64_t* context) {
     implement_write(context);
   else if (a7 == SYSCALL_OPENAT)
     implement_openat(context);
+  else if (a7 == SYSCALL_WAIT) 
+    implement_wait(context);
+  else if (a7 == SYSCALL_FORK) 
+    implement_fork(context);
   else if (a7 == SYSCALL_EXIT) {
     implement_exit(context);
 
@@ -9800,9 +9992,24 @@ uint64_t handle_exception(uint64_t* context) {
 /**
  * Get the next context to be executed
  */
-uint64_t* scheduler_next_context(uint64_t* previous_context) {
-  if (get_next_context(previous_context) == (uint64_t*) 0)
+uint64_t* scheduler_next(uint64_t* previous_context) {
+  uint64_t* next_context;
+  next_context = next_context_in_list(previous_context);
+
+  while(get_state(next_context) != STATE_READY) {
+    next_context = next_context_in_list(next_context);
+  }
+
+  return next_context;
+}
+
+/**
+ * Get the next context in the list
+ */
+uint64_t* next_context_in_list(uint64_t* previous_context) {
+  if (get_next_context(previous_context) == (uint64_t*) 0) {
     return used_contexts;
+  }
   return get_next_context(previous_context);
 }
 
@@ -9829,8 +10036,7 @@ uint64_t mipster(uint64_t* to_context) {
     } else if (handle_exception(from_context) == EXIT)
       return get_exit_code(from_context);
     else {
-      // TODO: scheduler should go here
-      to_context = scheduler_next_context(from_context);
+      to_context = scheduler_next(from_context);
 
       timeout = TIMESLICE;
     }
@@ -9848,8 +10054,7 @@ uint64_t hypster(uint64_t* to_context) {
     if (handle_exception(from_context) == EXIT)
       return get_exit_code(from_context);
     else
-      // TODO: scheduler should go here
-      to_context = scheduler_next_context(from_context);
+      to_context = scheduler_next(from_context);
   }
 }
 
