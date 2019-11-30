@@ -9340,10 +9340,10 @@ void deepcpy_ctxt(uint64_t* to, uint64_t* from) {
   set_pid(to, next_pid());
   set_state(to, STATE_READY);
 
-  // set uint64_t* values
-  set_parent(to, 0);//from); // TODO probably needed for wait to work properly
-  set_virtual_context(to, 0);//get_virtual_from(from)); // TODO what is vctxt
-  set_name(to, get_name(from)); // TODO deep copy this?
+  // set uint64_t* values TODO breaks mipster because from vctxt is always 0
+  set_parent(to, from); 
+  set_virtual_context(to, get_virtual_context(from)); 
+  set_name(to, get_name(from)); 
 
   deepcpy_pt(to, from);
 }

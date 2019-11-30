@@ -114,4 +114,7 @@ clean:
 	rm -rf manuscript/code/symbolic/*.btor2
 
 grade: clean selfie 
-	python grader/self.py concurrent-machines
+	echo
+	python grader/self.py fork-wait
+	echo
+	python grader/self.py fork-wait-with-status
