@@ -977,6 +977,12 @@ uint64_t* ELF_header = (uint64_t*) 0;
 void emit_exit();
 void implement_exit(uint64_t* context);
 
+void emit_unlock();
+void implement_unlock(uint64_t* context);
+
+void emit_lock();
+void implement_lock(uint64_t* context);
+
 void emit_fork();
 void implement_fork(uint64_t* context);
 
@@ -1006,6 +1012,8 @@ uint64_t debug_brk   = 0;
 uint64_t SYSCALL_EXIT   = 93;
 uint64_t SYSCALL_FORK   = 243;
 uint64_t SYSCALL_WAIT   = 244;
+uint64_t SYSCALL_UNLOCK = 245;
+uint64_t SYSCALL_LOCK   = 246;
 uint64_t SYSCALL_READ   = 63;
 uint64_t SYSCALL_WRITE  = 64;
 uint64_t SYSCALL_OPENAT = 56;
@@ -1500,6 +1508,7 @@ void deepcpy_ctxt(uint64_t* to, uint64_t* from);
 uint64_t STATE_READY = 0;
 uint64_t STATE_BLOCKED = 1;
 uint64_t STATE_ZOMBIE = 2;
+uint64_t STATE_WAITING_ON_LOCK = 3;
 
 uint64_t current_max_pid = 0;
 
@@ -5189,6 +5198,8 @@ void selfie_compile() {
   emit_open();
   emit_malloc();
   emit_switch();
+  emit_lock();
+  emit_unlock();
   emit_fork();
   emit_wait();
 
@@ -6217,6 +6228,54 @@ void implement_exit(uint64_t* context) {
     (char*) get_pid(context),
     (char*) sign_extend(get_exit_code(context), SYSCALL_BITWIDTH),
     (char*) fixed_point_ratio(get_program_break(context) - get_original_break(context), MEGABYTE, 2));
+}
+
+void emit_lock() {
+  create_symbol_table_entry(LIBRARY_TABLE, "lock", 0, PROCEDURE, UINT64_T, 0, binary_length);
+
+  // load the correct syscall number and invoke syscall
+  emit_addi(REG_A7, REG_ZR, SYSCALL_LOCK);
+
+  emit_ecall();
+
+  emit_jalr(REG_ZR, REG_RA, 0);
+}
+
+uint64_t global_lock = 0;
+
+void implement_lock(uint64_t* context) {
+  if (global_lock == 0) {
+    global_lock = 1;
+    set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
+  } else {
+    set_state(context, STATE_WAITING_ON_LOCK);
+  }
+}
+
+void emit_unlock() {
+  create_symbol_table_entry(LIBRARY_TABLE, "unlock", 0, PROCEDURE, UINT64_T, 0, binary_length);
+
+  // load the correct syscall number and invoke syscall
+  emit_addi(REG_A7, REG_ZR, SYSCALL_UNLOCK);
+
+  emit_ecall();
+
+  emit_jalr(REG_ZR, REG_RA, 0);
+}
+
+void implement_unlock(uint64_t* context) {
+  uint64_t* c;
+  c = used_contexts;
+
+  global_lock = 0;
+
+  set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
+
+  while (c != (uint64_t*) 0) {
+    if (get_state(c) == STATE_WAITING_ON_LOCK)
+      set_state(c, STATE_READY);
+    c = get_next_context(c);
+  }
 }
 
 void emit_fork() {
@@ -9933,6 +9992,10 @@ uint64_t handle_system_call(uint64_t* context) {
     implement_wait(context);
   else if (a7 == SYSCALL_FORK) 
     implement_fork(context);
+  else if (a7 == SYSCALL_LOCK) 
+    implement_lock(context);
+  else if (a7 == SYSCALL_UNLOCK) 
+    implement_unlock(context);
   else if (a7 == SYSCALL_EXIT) {
     implement_exit(context);
 
