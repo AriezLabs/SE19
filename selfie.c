@@ -977,6 +977,15 @@ uint64_t* ELF_header = (uint64_t*) 0;
 void emit_exit();
 void implement_exit(uint64_t* context);
 
+void emit_pthread_create();
+void implement_pthread_create(uint64_t* context);
+
+void emit_pthread_join();
+void implement_pthread_join(uint64_t* context);
+
+void emit_pthread_exit();
+void implement_pthread_exit(uint64_t* context);
+
 void emit_unlock();
 void implement_unlock(uint64_t* context);
 
@@ -1009,15 +1018,18 @@ uint64_t debug_write = 0;
 uint64_t debug_open  = 0;
 uint64_t debug_brk   = 0;
 
-uint64_t SYSCALL_EXIT   = 93;
-uint64_t SYSCALL_FORK   = 243;
-uint64_t SYSCALL_WAIT   = 244;
-uint64_t SYSCALL_UNLOCK = 245;
-uint64_t SYSCALL_LOCK   = 246;
-uint64_t SYSCALL_READ   = 63;
-uint64_t SYSCALL_WRITE  = 64;
-uint64_t SYSCALL_OPENAT = 56;
-uint64_t SYSCALL_BRK    = 214;
+uint64_t SYSCALL_EXIT     = 93;
+uint64_t SYSCALL_FORK     = 243;
+uint64_t SYSCALL_WAIT     = 244;
+uint64_t SYSCALL_UNLOCK   = 245;
+uint64_t SYSCALL_LOCK     = 246;
+uint64_t SYSCALL_PTHREADC = 247;
+uint64_t SYSCALL_PTHREADJ = 248;
+uint64_t SYSCALL_PTHREADE = 249;
+uint64_t SYSCALL_READ     = 63;
+uint64_t SYSCALL_WRITE    = 64;
+uint64_t SYSCALL_OPENAT   = 56;
+uint64_t SYSCALL_BRK      = 214;
 
 /* DIRFD_AT_FDCWD corresponds to AT_FDCWD in fcntl.h and
    is passed as first argument of the openat system call
@@ -1414,6 +1426,7 @@ uint64_t is = 0; // instruction id
 uint64_t* registers = (uint64_t*) 0; // general-purpose registers
 
 uint64_t* pt = (uint64_t*) 0; // page table
+uint64_t* current_shared_pt = (uint64_t*) 0; // page table
 
 // core state
 
@@ -1539,27 +1552,28 @@ uint64_t next_pid() {
 // | 17 | pid             | ID of context
 // | 18 | state           | current state of context (see above)
 // | 19 | parent context  | pid of parent context
+// | 20 | shared pt       | for threads: pointer to shared pt
 // +----+-----------------+
 // symbolic extension:
 // +----+-----------------+
-// | 19 | execution depth | number of executed instructions
-// | 20 | path condition  | pointer to path condition
-// | 21 | symbolic memory | pointer to symbolic memory
-// | 22 | symbolic regs   | pointer to symbolic registers
-// | 23 | beq counter     | number of executed symbolic beq instructions
-// | 24 | merge location  | program location at which the context can possibly be merged (later)
-// | 25 | prologues       | pointer to a stack that stores the prologues of procedures within which the context is currently located
-// | 26 | in recursion    | if the value is 1, then the context is currently in a recursion
-// | 27 | outside rec loc | program location at which the context has finished the recursion
-// | 28 | merge partner   | pointer to the context from which this context was created
+// | 21 | execution depth | number of executed instructions
+// | 22 | path condition  | pointer to path condition
+// | 23 | symbolic memory | pointer to symbolic memory
+// | 24 | symbolic regs   | pointer to symbolic registers
+// | 25 | beq counter     | number of executed symbolic beq instructions
+// | 26 | merge location  | program location at which the context can possibly be merged (later)
+// | 27 | prologues       | pointer to a stack that stores the prologues of procedures within which the context is currently located
+// | 28 | in recursion    | if the value is 1, then the context is currently in a recursion
+// | 29 | outside rec loc | program location at which the context has finished the recursion
+// | 30 | merge partner   | pointer to the context from which this context was created
 // +----+-----------------+
 
 uint64_t* allocate_context() {
-  return smalloc(7 * SIZEOFUINT64STAR + 13 * SIZEOFUINT64);
+  return smalloc(7 * SIZEOFUINT64STAR + 14 * SIZEOFUINT64);
 }
 
 uint64_t* allocate_symbolic_context() {
-  return smalloc(7 * SIZEOFUINT64STAR + 13 * SIZEOFUINT64 + 5 * SIZEOFUINT64STAR + 5 * SIZEOFUINT64);
+  return smalloc(7 * SIZEOFUINT64STAR + 14 * SIZEOFUINT64 + 5 * SIZEOFUINT64STAR + 5 * SIZEOFUINT64);
 }
 
 uint64_t next_context(uint64_t* context)    { return (uint64_t) context; }
@@ -1582,6 +1596,7 @@ uint64_t name(uint64_t* context)            { return (uint64_t) (context + 16); 
 uint64_t pid(uint64_t* context)             { return (uint64_t) (context + 17); }
 uint64_t state(uint64_t* context)           { return (uint64_t) (context + 18); }
 uint64_t parent_context(uint64_t* context)  { return (uint64_t) (context + 19); }
+uint64_t shared_pt(uint64_t* context)       { return (uint64_t) (context + 20); }
 
 uint64_t* get_next_context(uint64_t* context)    { return (uint64_t*) *context; }
 uint64_t* get_prev_context(uint64_t* context)    { return (uint64_t*) *(context + 1); }
@@ -1603,17 +1618,18 @@ char*     get_name(uint64_t* context)            { return (char*)     *(context 
 uint64_t  get_pid(uint64_t* context)             { return             *(context + 17); }
 uint64_t  get_state(uint64_t* context)           { return             *(context + 18); }
 uint64_t  get_parent_context(uint64_t* context)  { return             *(context + 19); }
+uint64_t* get_shared_pt(uint64_t* context)       { return (uint64_t*) *(context + 20); }
 
-uint64_t  get_execution_depth(uint64_t* context) { return             *(context + 20); }
-char*     get_path_condition(uint64_t* context)  { return (char*)     *(context + 21); }
-uint64_t* get_symbolic_memory(uint64_t* context) { return (uint64_t*) *(context + 22); }
-uint64_t* get_symbolic_regs(uint64_t* context)   { return (uint64_t*) *(context + 23); }
-uint64_t  get_beq_counter(uint64_t* context)     { return             *(context + 24); }
-uint64_t  get_merge_location(uint64_t* context)  { return             *(context + 25); }
-uint64_t* get_prologues(uint64_t* context)       { return (uint64_t*) *(context + 26); }
-uint64_t  get_in_recursion(uint64_t* context)    { return             *(context + 27); }
-uint64_t  get_outside_rec_loc(uint64_t* context) { return             *(context + 28); }
-uint64_t* get_merge_partner(uint64_t* context)   { return (uint64_t*) *(context + 29); }
+uint64_t  get_execution_depth(uint64_t* context) { return             *(context + 21); }
+char*     get_path_condition(uint64_t* context)  { return (char*)     *(context + 22); }
+uint64_t* get_symbolic_memory(uint64_t* context) { return (uint64_t*) *(context + 23); }
+uint64_t* get_symbolic_regs(uint64_t* context)   { return (uint64_t*) *(context + 24); }
+uint64_t  get_beq_counter(uint64_t* context)     { return             *(context + 25); }
+uint64_t  get_merge_location(uint64_t* context)  { return             *(context + 26); }
+uint64_t* get_prologues(uint64_t* context)       { return (uint64_t*) *(context + 27); }
+uint64_t  get_in_recursion(uint64_t* context)    { return             *(context + 28); }
+uint64_t  get_outside_rec_loc(uint64_t* context) { return             *(context + 29); }
+uint64_t* get_merge_partner(uint64_t* context)   { return (uint64_t*) *(context + 30); }
 
 void set_next_context(uint64_t* context, uint64_t* next)      { *context        = (uint64_t) next; }
 void set_prev_context(uint64_t* context, uint64_t* prev)      { *(context + 1)  = (uint64_t) prev; }
@@ -1635,17 +1651,18 @@ void set_name(uint64_t* context, char* name)                  { *(context + 16) 
 void set_pid(uint64_t* context, uint64_t pid)                 { *(context + 17) = (uint64_t) pid; }
 void set_state(uint64_t* context, uint64_t state)             { *(context + 18) = (uint64_t) state; }
 void set_parent_context(uint64_t* context, uint64_t pid)      { *(context + 19) = pid; }
+void set_shared_pt(uint64_t* context, uint64_t* pt)           { *(context + 20) = (uint64_t) pt; }
 
-void set_execution_depth(uint64_t* context, uint64_t depth)    { *(context + 20) =            depth; }
-void set_path_condition(uint64_t* context, char* path)         { *(context + 21) = (uint64_t) path; }
-void set_symbolic_memory(uint64_t* context, uint64_t* memory)  { *(context + 22) = (uint64_t) memory; }
-void set_symbolic_regs(uint64_t* context, uint64_t* regs)      { *(context + 23) = (uint64_t) regs; }
-void set_beq_counter(uint64_t* context, uint64_t counter)      { *(context + 24) =            counter; }
-void set_merge_location(uint64_t* context, uint64_t location)  { *(context + 25) =            location; }
-void set_prologues(uint64_t* context, uint64_t* prologues)     { *(context + 26) = (uint64_t) prologues; }
-void set_in_recursion(uint64_t* context, uint64_t in_rec)      { *(context + 27) =            in_rec; }
-void set_outside_rec_loc(uint64_t* context, uint64_t location) { *(context + 28) =            location; }
-void set_merge_partner(uint64_t* context, uint64_t* partner)   { *(context + 29) = (uint64_t) partner; }
+void set_execution_depth(uint64_t* context, uint64_t depth)    { *(context + 21) =            depth; }
+void set_path_condition(uint64_t* context, char* path)         { *(context + 22) = (uint64_t) path; }
+void set_symbolic_memory(uint64_t* context, uint64_t* memory)  { *(context + 23) = (uint64_t) memory; }
+void set_symbolic_regs(uint64_t* context, uint64_t* regs)      { *(context + 24) = (uint64_t) regs; }
+void set_beq_counter(uint64_t* context, uint64_t counter)      { *(context + 25) =            counter; }
+void set_merge_location(uint64_t* context, uint64_t location)  { *(context + 26) =            location; }
+void set_prologues(uint64_t* context, uint64_t* prologues)     { *(context + 27) = (uint64_t) prologues; }
+void set_in_recursion(uint64_t* context, uint64_t in_rec)      { *(context + 28) =            in_rec; }
+void set_outside_rec_loc(uint64_t* context, uint64_t location) { *(context + 29) =            location; }
+void set_merge_partner(uint64_t* context, uint64_t* partner)   { *(context + 30) = (uint64_t) partner; }
 
 // -----------------------------------------------------------------
 // -------------------------- MICROKERNEL --------------------------
@@ -5202,6 +5219,9 @@ void selfie_compile() {
   emit_unlock();
   emit_fork();
   emit_wait();
+  emit_pthread_create();
+  emit_pthread_join();
+  emit_pthread_exit();
 
   // implicitly declare main procedure in global symbol table
   // copy "main" string into zeroed double word to obtain unique hash
@@ -6165,6 +6185,36 @@ void selfie_load() {
 // ----------------------- MIPSTER SYSCALLS ------------------------
 // -----------------------------------------------------------------
 
+// Return 1 iff context has child
+uint64_t context_has_child(uint64_t pid) {
+  uint64_t* c;
+  c = used_contexts;
+
+  while (c != (uint64_t*) 0) {
+    if (get_parent_context(c) == pid)
+      return 1;
+    c = get_next_context(c);
+  }
+
+  return 0;
+}
+
+// Return pointer to zombie child or 0 if none
+uint64_t* context_has_zombie_child(uint64_t pid) {
+  uint64_t* c;
+  c = used_contexts;
+
+  while (c != (uint64_t*) 0) {
+    if (get_parent_context(c) == pid)
+      if (get_state(c) == STATE_ZOMBIE) {
+        return c;
+      }
+    c = get_next_context(c);
+  }
+
+  return (uint64_t*) 0;
+}
+
 /**
  * called once when the compilation process begins.
  * this code is JAL'd to like a normal procedure:
@@ -6187,12 +6237,36 @@ void emit_exit() {
   // never returns here
 }
 
+void print_all_pids() {
+  uint64_t* c;
+  c = used_contexts;
+  printf1("\tcurrent used_contexts list: (c=%p)\n", c);
+  while(c != (uint64_t*) 0) {
+    printf2("\tcontext %d: state %d\n", get_pid(c), get_state(c));
+    c = get_next_context(c);
+  }
+}
+
+uint64_t* context_for_pid(uint64_t pid) {
+  uint64_t* c;
+  c = used_contexts;
+  while (get_pid(c) != pid) {
+    c = get_next_context(c);
+    if (c == (uint64_t*) 0)
+      return (uint64_t*) 0;
+  }
+  return c;
+}
+
 /**
  * executed if mipster runs into ecall with above parameters 
  */
 void implement_exit(uint64_t* context) {
   // parameter;
   uint64_t signed_int_exit_code;
+  uint64_t* parent;
+  uint64_t vaddr;
+  uint64_t exitcode;
 
   if (debug_syscalls) {
     print("(exit): ");
@@ -6204,11 +6278,54 @@ void implement_exit(uint64_t* context) {
 
   set_exit_code(context, sign_shrink(signed_int_exit_code, SYSCALL_BITWIDTH));
 
-  // TODO check if parent is alive, if yes
-  set_state(context, STATE_ZOMBIE);
-  // else if parent is waiting return code,
-  // else if parent dead (is_orphan()) call
-    // used_contexts = delete_context(context, used_contexts);
+  //printf1("searching for parent (pid %d) in:\n", get_parent_context(context));
+  //print_all_pids();
+  parent = context_for_pid(get_parent_context(context));
+
+  //print("uc list before:\n");
+  //print_all_pids();
+
+  if (parent != (uint64_t*) 0) {
+
+    vaddr = *(get_regs(parent) + REG_A0);
+    exitcode = get_exit_code(context);
+
+    // for threads, do not shift exitcode
+    if (get_shared_pt(context) == (uint64_t*) 0) {
+      exitcode = left_shift(exitcode, 56);
+      exitcode = right_shift(exitcode, 48);
+    }
+
+    // parent running
+    if (get_state(parent) == STATE_READY) {
+      printf3("parent %d of context %d is READY: setting %d to ZOMBIE\n", get_parent_context(context), get_pid(context), get_pid(context));
+      set_state(context, STATE_ZOMBIE);
+
+    // parent waiting
+    } else if (get_state(parent) == STATE_BLOCKED) {
+      printf3("parent %d of context %d is WAITING: killing %d and passing exit code\n", get_parent_context(context), get_pid(context), get_pid(context));
+
+      map_and_store(parent, vaddr, exitcode);
+      *(get_regs(parent) + REG_A0) = get_pid(context);
+
+      used_contexts = delete_context(context, used_contexts);
+
+      set_state(parent, STATE_READY);
+
+    // parent dead
+    } else if (get_state(parent) == STATE_ZOMBIE) {
+      printf3("parent %d of context %d is ZOMBIE: killing %d\n", get_parent_context(context), get_pid(context), get_pid(context));
+      used_contexts = delete_context(context, used_contexts);
+    }
+
+  // parent dead/no parent
+  } else { 
+    printf3("parent %d of context %d not found: killing %d\n", get_parent_context(context), get_pid(context), get_pid(context));
+    used_contexts = delete_context(context, used_contexts);
+  }
+
+  //print("uc list after exit:\n");
+  //print_all_pids();
 
   if (symbolic) {
     print("\n(push 1)\n");
@@ -6228,6 +6345,104 @@ void implement_exit(uint64_t* context) {
     (char*) get_pid(context),
     (char*) sign_extend(get_exit_code(context), SYSCALL_BITWIDTH),
     (char*) fixed_point_ratio(get_program_break(context) - get_original_break(context), MEGABYTE, 2));
+}
+
+void emit_pthread_create() {
+  create_symbol_table_entry(LIBRARY_TABLE, "pthread_create", 0, PROCEDURE, UINT64_T, 0, binary_length);
+
+  // load the correct syscall number and invoke syscall
+  emit_addi(REG_A7, REG_ZR, SYSCALL_PTHREADC);
+
+  emit_ecall();
+
+  emit_jalr(REG_ZR, REG_RA, 0);
+}
+
+void implement_pthread_create(uint64_t* context) {
+  uint64_t* child;
+
+  child = new_context();
+
+  deepcpy_regs(child, context);
+  deepcpy_ctxt(child, context);
+
+  set_pt(child, zalloc(VIRTUALMEMORYSIZE / PAGESIZE * REGISTERSIZE));
+
+  if (get_shared_pt(context) == (uint64_t*) 0)
+    set_shared_pt(child, get_pt(context));
+  else 
+    set_shared_pt(child, get_shared_pt(context));
+
+  printf2("created context %d with shared pt at %p\n", get_pid(child), get_shared_pt(child));
+  deepcpy_pt_section(child, context, get_lowest_hi_page(context), get_highest_hi_page(context));
+
+  set_parent_context(child, get_pid(context));
+
+  // return pid of child to parent and 0 to child
+  *(get_regs(context) + REG_A0) = get_pid(child);
+  *(get_regs(child) + REG_A0) = 0;
+
+  set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
+  set_pc(child, get_pc(child) + INSTRUCTIONSIZE);
+}
+
+void emit_pthread_join() {
+  create_symbol_table_entry(LIBRARY_TABLE, "pthread_join", 0, PROCEDURE, UINT64_T, 0, binary_length);
+
+  emit_ld(REG_A0, REG_SP, 0); // status pointer
+  emit_addi(REG_SP, REG_SP, REGISTERSIZE);
+
+  // load the correct syscall number and invoke syscall
+  emit_addi(REG_A7, REG_ZR, SYSCALL_PTHREADJ);
+
+  emit_ecall();
+
+  emit_jalr(REG_ZR, REG_RA, 0);
+}
+
+void implement_pthread_join(uint64_t* context) {
+  uint64_t* zombie_child;
+  uint64_t vaddr;
+  uint64_t exitcode;
+
+  if (context_has_child(get_pid(context))) {
+    zombie_child = context_has_zombie_child(get_pid(context));
+
+    if (zombie_child != (uint64_t*) 0) {
+      vaddr = *(get_regs(context) + REG_A0);
+
+      exitcode = get_exit_code(zombie_child);
+
+      map_and_store(context, vaddr, exitcode);
+      *(get_regs(context) + REG_A0) = get_pid(zombie_child);
+
+      used_contexts = delete_context(zombie_child, used_contexts);
+
+    } else {
+      set_state(context, STATE_BLOCKED);
+    }
+  }
+
+  set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
+}
+
+void emit_pthread_exit() {
+  create_symbol_table_entry(LIBRARY_TABLE, "pthread_exit", 0, PROCEDURE, VOID_T, 0, binary_length);
+
+  emit_ld(REG_A0, REG_SP, 0); // status value
+  emit_addi(REG_SP, REG_SP, REGISTERSIZE);
+
+  // load the correct syscall number and invoke syscall
+  emit_addi(REG_A7, REG_ZR, SYSCALL_PTHREADE);
+
+  emit_ecall();
+
+  emit_jalr(REG_ZR, REG_RA, 0);
+}
+
+void implement_pthread_exit(uint64_t* context) {
+  printf1("thread %d exiting\n", get_pid(context));
+  implement_exit(context);
 }
 
 void emit_lock() {
@@ -6294,7 +6509,9 @@ void implement_fork(uint64_t* context) {
 
   child = new_context();
 
+  deepcpy_regs(child, context);
   deepcpy_ctxt(child, context);
+  deepcpy_pt(child, context);
 
   set_parent_context(child, get_pid(context));
 
@@ -6318,34 +6535,6 @@ void emit_wait() {
   emit_ecall();
 
   emit_jalr(REG_ZR, REG_RA, 0);
-}
-
-uint64_t context_has_child(uint64_t pid) {
-  uint64_t* c;
-  c = used_contexts;
-
-  while (c != (uint64_t*) 0) {
-    if (get_parent_context(c) == pid)
-      return 1;
-    c = get_next_context(c);
-  }
-
-  return 0;
-}
-
-uint64_t* context_has_zombie_child(uint64_t pid) {
-  uint64_t* c;
-  c = used_contexts;
-
-  while (c != (uint64_t*) 0) {
-    if (get_parent_context(c) == pid)
-      if (get_state(c) == STATE_ZOMBIE) {
-        return c;
-      }
-    c = get_next_context(c);
-  }
-
-  return (uint64_t*) 0;
 }
 
 void implement_wait(uint64_t* context) {
@@ -6945,6 +7134,8 @@ uint64_t* do_switch(uint64_t* from_context, uint64_t* to_context, uint64_t timeo
   pc        = get_pc(to_context);
   registers = get_regs(to_context);
   pt        = get_pt(to_context);
+  current_shared_pt = get_shared_pt(to_context);
+  //printf2("shared pt of context %d: %p\n", get_pid(to_context), current_shared_pt);
 
   if (symbolic) {
     path_condition  = get_path_condition(to_context);
@@ -7109,12 +7300,32 @@ uint64_t load_virtual_memory(uint64_t* table, uint64_t vaddr) {
   // assert: is_valid_virtual_address(vaddr) == 1
   // assert: is_virtual_address_mapped(table, vaddr) == 1
 
+  if (table == pt) {
+    //printf2("context %ds LOAD access to vaddr %d\n", get_pid(current_context), vaddr);
+    if (current_shared_pt != (uint64_t*) 0) {
+      if (vaddr < *(get_regs(current_context) + REG_SP)) {
+        //print("redirected to shared pt\n");
+        return load_physical_memory(tlb(current_shared_pt, vaddr));
+      }
+    }
+  }
+
   return load_physical_memory(tlb(table, vaddr));
 }
 
 void store_virtual_memory(uint64_t* table, uint64_t vaddr, uint64_t data) {
   // assert: is_valid_virtual_address(vaddr) == 1
   // assert: is_virtual_address_mapped(table, vaddr) == 1
+
+  if (table == pt) {
+    //printf2("context %ds WRITE access to vaddr %d\n", get_pid(current_context), vaddr);
+    if (current_shared_pt != (uint64_t*) 0) {
+      if (vaddr < *(get_regs(current_context) + REG_SP)) {
+        //print("redirected to shared pt\n");
+        store_physical_memory(tlb(current_shared_pt, vaddr), data);
+      }
+    }
+  }
 
   store_physical_memory(tlb(table, vaddr), data);
 }
@@ -9445,8 +9656,6 @@ void deepcpy_pt(uint64_t* to, uint64_t* from) {
  * Deep copy a context
  */
 void deepcpy_ctxt(uint64_t* to, uint64_t* from) {
-  deepcpy_regs(to, from);
-
   // set uint64_t values
   // TODO can some be left out e.g. exception, faulting page, exit code?
   set_pc(to, get_pc(from));
@@ -9464,8 +9673,6 @@ void deepcpy_ctxt(uint64_t* to, uint64_t* from) {
   set_parent(to, get_parent(from)); 
   set_virtual_context(to, get_virtual_context(from)); 
   set_name(to, get_name(from)); 
-
-  deepcpy_pt(to, from);
 }
 
 uint64_t* copy_context(uint64_t* original, uint64_t location, char* condition) {
@@ -9571,8 +9778,11 @@ void free_context(uint64_t* context) {
 /**
  * clears context from doubly linked list and fixes it up
  * returns the context to free context list
+ * breaks list if context to delete is not in list...
  */
 uint64_t* delete_context(uint64_t* context, uint64_t* from) {
+  //printf2("deleting %d from %p\n", get_pid(context), from);
+
   if (get_next_context(context) != (uint64_t*) 0)
     set_prev_context(get_next_context(context), get_prev_context(context));
 
@@ -9996,10 +10206,15 @@ uint64_t handle_system_call(uint64_t* context) {
     implement_lock(context);
   else if (a7 == SYSCALL_UNLOCK) 
     implement_unlock(context);
+  else if (a7 == SYSCALL_PTHREADC) 
+    implement_pthread_create(context);
+  else if (a7 == SYSCALL_PTHREADJ) 
+    implement_pthread_join(context);
+  else if (a7 == SYSCALL_PTHREADE) 
+    implement_pthread_exit(context);
   else if (a7 == SYSCALL_EXIT) {
     implement_exit(context);
 
-    // TODO: exit only if all contexts have exited
     if (get_pid(context) == init_pid)
       return EXIT;
   } else {
@@ -10112,16 +10327,37 @@ uint64_t handle_exception(uint64_t* context) {
   }
 }
 
+uint64_t is_invalid_context(uint64_t* c) {
+  uint64_t* c2;
+  c2 = used_contexts;
+  while (c2 != (uint64_t*) 0) {
+    if (get_pid(c2) == get_pid(c))
+      return 0;
+    c2 = get_next_context(c2);
+  }
+  return 1;
+}
+
 /**
  * Get the next context to be executed
  */
 uint64_t* scheduler_next(uint64_t* previous_context) {
   uint64_t* next_context;
-  next_context = next_context_in_list(previous_context);
 
+  next_context = next_context_in_list(previous_context);
   while(get_state(next_context) != STATE_READY) {
     next_context = next_context_in_list(next_context);
   }
+
+  // due to the nature of implement_exit and delete_context 
+  // we may be spinning in a loop of two dead contexts that exited
+  // at the same time
+  if (is_invalid_context(next_context)) {
+    next_context = scheduler_next(used_contexts);
+  }
+  
+  //print_all_pids();
+  //printf2("SCHEDULER: %d -> %d\n", get_pid(previous_context), get_pid(next_context));
 
   return next_context;
 }
